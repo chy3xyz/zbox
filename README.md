@@ -4,61 +4,63 @@ Minimal rootless Linux sandbox written in [Zig](https://ziglang.org/).
 
 Use cases: build environments, agentic AI sessions, foundation for container runtimes.
 
-Each run creates a fresh, isolated filesystem with its own user/mount/UTS namespaces - no sudo required.
+Each run creates a fresh, isolated filesystem with its own user/mount/PID/UTS/network namespaces — no sudo required.
 
-# Why Zig?
+## Why Zig?
 
-- **Direct syscall access** - Zig calls Linux syscalls directly without a libc, making it easy to use `clone`, `mount`, `chroot`, `pivot_root` without overhead
-- **No runtime** - No garbage collector, no VM, no runtime. Produces a tiny static binary - perfect for a minimal sandbox
-- **Cross-compilation** - Built-in support for targeting different architectures
+- **Direct syscall access** — calls Linux syscalls directly without libc, making `clone`, `mount`, `chroot` straightforward
+- **No runtime** — no GC, no VM. Produces a tiny static binary ideal for a minimal sandbox
+- **Cross-compilation** — built-in support for targeting different architectures
 
-# Requirements
+## Requirements
 
 - Linux kernel with namespace support
-- [busybox](https://busybox.net/) (statically linked) installed
+- A statically-linked shell binary (e.g. [busybox](https://busybox.net/)) for testing
 
-## What is busybox?
+### busybox
 
-[BusyBox](https://busybox.net/) combines tiny versions of many common UNIX utilities (sh, ls, cat, echo, etc.) into a single executable. It's commonly used in embedded systems and containers because it's:
+[BusyBox](https://busybox.net/) combines tiny versions of common UNIX utilities (sh, ls, cat, echo, etc.) into a single ~1 MB static binary.  zbox uses it as the default binary executed inside the sandbox for interactive testing.
 
-- **Small** - ~1MB static binary
-- **Self-contained** - No external library dependencies
-- **Fast** - Minimal overhead
+### Alternatives
 
-## Alternatives to busybox
+- [toybox](https://landley.net/toybox/) — minimal tool suite (used by Android)
+- [sbase](http://git.suckless.org/sbase/) — suckless community tools
+- Static builds of coreutils
 
-If you don't want to use busybox, you can configure zbox to use other statically-linked binaries:
-
-- [toybox](https://landley.net/toybox/) - Another minimal tool suite (used by Android)
-- [sbase](http://git.suckless.org/sbase/) - Simple tools from the suckless community
-- Static builds of coreutils - Some distributions offer static builds
-
-# Build
+## Build
 
 ```bash
 zig build
 ```
 
-# Running
+## Test
+
+```bash
+zig build test
+```
+
+## Running
 
 ```bash
 ./zig-out/bin/zbox
 ```
 
 Options:
-- `-b, --binary <path>` - Binary to execute (default: /bin/busybox)
-- `-r, --root <path>` - Container root directory
-- `-h, --help` - Show help
+- `-b, --binary <path>` — binary to execute inside the sandbox (default: `/bin/busybox`)
+- `-r, --root <path>` — container root directory (default: auto-generated under `/tmp`)
+- `-h, --help` — show help
+- `--` — forward remaining arguments to the sandboxed binary
 
-# Roadmap
+## Roadmap
 
 - [x] User namespace with UID/GID mapping (rootless)
 - [x] Mount namespace
 - [x] UTS namespace isolation
 - [x] Filesystem isolation (chroot)
-- [x] Bind mounts (/proc, /dev, /tmp)
+- [x] PID namespace isolation
+- [x] Mounts (proc, tmpfs for /dev and /tmp)
 - [x] Execute target binary
-- [x] Copy busybox into container
+- [x] Copy configured binary into container
 - [x] Fresh filesystem per run
 - [x] Interactive shell (stdin/stdout)
 - [x] Network namespace isolation
