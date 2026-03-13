@@ -64,6 +64,6 @@ Options:
 - [x] Fresh filesystem per run
 - [x] Interactive shell (stdin/stdout)
 - [x] Network namespace isolation
-- [ ] Syscall filtering (seccomp)
+- [x] Syscall filtering (seccomp-BPF whitelist)
 - [ ] pivot_root (more secure than chroot)
 - [ ] OCI compatibility (run container images)

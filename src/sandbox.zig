@@ -6,6 +6,7 @@ const log = std.log;
 
 const config = @import("config.zig");
 const network = @import("network.zig");
+const seccomp = @import("seccomp.zig");
 const fs = @import("fs.zig");
 
 const STACK_SIZE: u32 = 64 * 1024;
@@ -211,7 +212,7 @@ pub const Sandbox = struct {
         ) catch unreachable;
         try std.fs.copyFileAbsolute(self.cfg.binary, bin_dst, .{});
 
-        try link_host_configs(root);
+        copy_host_configs(root);
         log.info("containerfs setup complete", .{});
     }
 
@@ -273,13 +274,15 @@ fn child_bind_mounts(root: [:0]const u8) !void {
     try fs.mount_fs("tmpfs", fs.join_path(&buf, root, "/tmp"));
 }
 
-fn link_host_configs(root: [:0]const u8) !void {
+/// Copy well-known host config files into the container. Copies rather
+/// than symlinks because symlinks to `/etc/foo` form a loop inside chroot.
+fn copy_host_configs(root: [:0]const u8) void {
     const configs = [_][:0]const u8{ "/etc/passwd", "/etc/group", "/etc/resolv.conf" };
     inline for (configs) |conf| {
         if (std.fs.accessAbsolute(conf, .{})) |_| {
-            var link_buf: [4096]u8 = undefined;
-            const link = fs.join_path(&link_buf, root, conf);
-            try fs.create_symlink(conf, link);
+            var buf: [4096]u8 = undefined;
+            const dst = fs.join_path(&buf, root, conf);
+            std.fs.copyFileAbsolute(conf, dst, .{}) catch {};
         } else |_| {}
     }
 }
@@ -319,6 +322,13 @@ fn child_entry(arg: usize) callconv(.c) u8 {
 
     network.bring_up_loopback() catch |err| {
         log.err("loopback failed: {}", .{err});
+        return 1;
+    };
+
+    // Install seccomp filter last — after all privileged setup is done
+    // but before execve hands control to untrusted code.
+    seccomp.install() catch |err| {
+        log.err("seccomp install failed: {}", .{err});
         return 1;
     };
 
