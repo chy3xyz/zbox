@@ -19,6 +19,32 @@ Each run creates a fresh, isolated filesystem with its own user/mount/PID/UTS/ne
 - **Rootless namespaces** — user namespaces must be enabled (check with `sysctl kernel.unprivileged_userns_clone`)
 - A statically-linked shell binary (e.g. [busybox](https://busybox.net/)) for testing
 
+## Security
+
+### Syscall Filtering
+
+zbox uses **seccomp-BPF with a deny list approach** (similar to Docker's default profile):
+
+- **Default action**: Allow all syscalls
+- **Blocked syscalls**: 54 dangerous syscalls are explicitly blocked
+- **Blocked categories**:
+  - Kernel module loading (`init_module`, `finit_module`, `delete_module`)
+  - Kernel execution (`kexec_load`, `kexec_file_load`)
+  - Hardware access (`ioperm`, `iopl`, `syslog`)
+  - Memory manipulation (`mbind`, `set_mempolicy`, etc.)
+  - Network operations (blocked since network namespace is isolated)
+  - Device access (`mknod`, `mknodat`)
+  - Privilege escalation (`setuid`, `setgid`, etc.)
+  - System control (`reboot`, `swapon`, `swapoff`)
+  - Debugging (`ptrace`, `process_vm_readv`, etc.)
+
+### Security Features
+
+- **Architecture check**: Only x86_64 syscalls are processed
+- **NO_NEW_PRIVS**: Required before seccomp filter installation
+- **Namespace isolation**: User, mount, PID, UTS, and network namespaces
+- **Filesystem isolation**: chroot into container root
+
 ### busybox
 
 [BusyBox](https://busybox.net/) combines tiny versions of common UNIX utilities (sh, ls, cat, echo, etc.) into a single ~1 MB static binary.  zbox uses it as the default binary executed inside the sandbox for interactive testing.
@@ -66,6 +92,6 @@ Options:
 - [x] Fresh filesystem per run
 - [x] Interactive shell (stdin/stdout)
 - [x] Network namespace isolation
-- [x] Syscall filtering (seccomp-BPF whitelist)
+- [x] Syscall filtering (seccomp-BPF deny list)
 - [ ] pivot_root (more secure than chroot)
 - [ ] OCI compatibility (run container images)

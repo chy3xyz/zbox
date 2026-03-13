@@ -40,123 +40,100 @@ fn bpf_jump(code: u16, k: u32, jt: u8, jf: u8) sock_filter {
 const OFFSET_NR = 0; // offsetof(seccomp_data, nr)
 const OFFSET_ARCH = 4; // offsetof(seccomp_data, arch)
 
-/// Syscalls the sandboxed process is allowed to make. Covers what
-/// busybox sh needs for basic interactive use (file ops, process
-/// management, memory, signals, terminal I/O).
+/// Syscalls the sandboxed process is NOT allowed to make.
+/// This is a deny list approach: default allow, block specific dangerous syscalls.
+/// Based on container security best practices and Docker's blocked syscalls.
 /// Note: This filter is x86_64-specific (hardcoded syscall numbers and
 /// architecture check). Other architectures require different syscall
 /// numbers and arch identifiers.
-const allowed_syscalls = [_]u32{
-    // Process lifecycle.
-    @intFromEnum(linux.SYS.execve),
-    @intFromEnum(linux.SYS.exit),
-    @intFromEnum(linux.SYS.exit_group),
-    @intFromEnum(linux.SYS.fork),
-    @intFromEnum(linux.SYS.clone),
-    @intFromEnum(linux.SYS.clone3),
-    @intFromEnum(linux.SYS.vfork),
-    @intFromEnum(linux.SYS.wait4),
-    @intFromEnum(linux.SYS.getpid),
-    @intFromEnum(linux.SYS.getppid),
-    @intFromEnum(linux.SYS.getuid),
-    @intFromEnum(linux.SYS.getgid),
-    @intFromEnum(linux.SYS.geteuid),
-    @intFromEnum(linux.SYS.getegid),
-    @intFromEnum(linux.SYS.getpgrp),
-    @intFromEnum(linux.SYS.getpgid),
-    @intFromEnum(linux.SYS.setpgid),
-    @intFromEnum(linux.SYS.setsid),
-    @intFromEnum(linux.SYS.gettid),
-    @intFromEnum(linux.SYS.set_tid_address),
-    @intFromEnum(linux.SYS.getrlimit),
-    @intFromEnum(linux.SYS.setrlimit),
+const blocked_syscalls = [_]u32{
+    // Kernel module loading - prevents loading malicious kernel modules
+    @intFromEnum(linux.SYS.init_module),
+    @intFromEnum(linux.SYS.finit_module),
+    @intFromEnum(linux.SYS.delete_module),
 
-    // File I/O.
-    @intFromEnum(linux.SYS.open),
-    @intFromEnum(linux.SYS.openat),
-    @intFromEnum(linux.SYS.read),
-    @intFromEnum(linux.SYS.pread64),
-    @intFromEnum(linux.SYS.write),
-    @intFromEnum(linux.SYS.close),
-    @intFromEnum(linux.SYS.lseek),
-    @intFromEnum(linux.SYS.dup),
-    @intFromEnum(linux.SYS.dup2),
-    @intFromEnum(linux.SYS.dup3),
-    @intFromEnum(linux.SYS.pipe2),
-    @intFromEnum(linux.SYS.fcntl),
-    @intFromEnum(linux.SYS.stat),
-    @intFromEnum(linux.SYS.fstat),
-    @intFromEnum(linux.SYS.lstat),
-    @intFromEnum(linux.SYS.fstatat64),
-    @intFromEnum(linux.SYS.statx),
-    @intFromEnum(linux.SYS.access),
-    @intFromEnum(linux.SYS.faccessat),
-    @intFromEnum(linux.SYS.faccessat2),
-    @intFromEnum(linux.SYS.readlinkat),
-    @intFromEnum(linux.SYS.getdents),
-    @intFromEnum(linux.SYS.getdents64),
-    @intFromEnum(linux.SYS.getcwd),
-    @intFromEnum(linux.SYS.chdir),
-    @intFromEnum(linux.SYS.fchdir),
-    @intFromEnum(linux.SYS.unlinkat),
-    @intFromEnum(linux.SYS.mkdirat),
-    @intFromEnum(linux.SYS.renameat2),
-    @intFromEnum(linux.SYS.umask),
+    // Kernel execution - prevents kexec attacks
+    @intFromEnum(linux.SYS.kexec_load),
+    @intFromEnum(linux.SYS.kexec_file_load),
 
-    // Memory management.
-    @intFromEnum(linux.SYS.brk),
-    @intFromEnum(linux.SYS.mmap),
-    @intFromEnum(linux.SYS.munmap),
-    @intFromEnum(linux.SYS.mprotect),
-    @intFromEnum(linux.SYS.mremap),
-    @intFromEnum(linux.SYS.madvise),
+    // Hardware access - prevents direct hardware manipulation
+    @intFromEnum(linux.SYS.ioperm),
+    @intFromEnum(linux.SYS.iopl),
+    @intFromEnum(linux.SYS.syslog),
 
-    // Signals.
-    @intFromEnum(linux.SYS.rt_sigaction),
-    @intFromEnum(linux.SYS.rt_sigprocmask),
-    @intFromEnum(linux.SYS.rt_sigreturn),
-    @intFromEnum(linux.SYS.sigaltstack),
-    @intFromEnum(linux.SYS.kill),
-    @intFromEnum(linux.SYS.tgkill),
+    // Memory management (dangerous variants) - prevents memory manipulation attacks
+    @intFromEnum(linux.SYS.mbind),
+    @intFromEnum(linux.SYS.set_mempolicy),
+    @intFromEnum(linux.SYS.get_mempolicy),
+    @intFromEnum(linux.SYS.migrate_pages),
+    @intFromEnum(linux.SYS.move_pages),
 
-    // Terminal / misc I/O.
-    @intFromEnum(linux.SYS.ioctl),
-    @intFromEnum(linux.SYS.writev),
-    @intFromEnum(linux.SYS.readv),
-    @intFromEnum(linux.SYS.ppoll),
-    @intFromEnum(linux.SYS.pselect6),
-    @intFromEnum(linux.SYS.poll),
-    @intFromEnum(linux.SYS.select),
+    // Network syscalls - blocked since we use network namespace isolation
+    @intFromEnum(linux.SYS.socket),
+    @intFromEnum(linux.SYS.connect),
+    @intFromEnum(linux.SYS.accept),
+    @intFromEnum(linux.SYS.bind),
+    @intFromEnum(linux.SYS.listen),
+    @intFromEnum(linux.SYS.sendto),
+    @intFromEnum(linux.SYS.recvfrom),
+    @intFromEnum(linux.SYS.sendmsg),
+    @intFromEnum(linux.SYS.recvmsg),
+    @intFromEnum(linux.SYS.accept4),
+    @intFromEnum(linux.SYS.shutdown),
+    @intFromEnum(linux.SYS.getpeername),
+    @intFromEnum(linux.SYS.getsockname),
+    @intFromEnum(linux.SYS.getsockopt),
+    @intFromEnum(linux.SYS.setsockopt),
 
-    // Time and system info.
-    @intFromEnum(linux.SYS.clock_gettime),
-    @intFromEnum(linux.SYS.nanosleep),
-    @intFromEnum(linux.SYS.uname),
-    @intFromEnum(linux.SYS.getrandom),
-    @intFromEnum(linux.SYS.prlimit64),
-    @intFromEnum(linux.SYS.prctl),
-    @intFromEnum(linux.SYS.sysinfo),
+    // Device access - prevents creating device nodes
+    @intFromEnum(linux.SYS.mknod),
+    @intFromEnum(linux.SYS.mknodat),
 
-    // Threading / futex.
-    @intFromEnum(linux.SYS.futex),
-    @intFromEnum(linux.SYS.set_robust_list),
-    @intFromEnum(linux.SYS.rseq),
+    // Privilege escalation - prevents changing privileges
+    @intFromEnum(linux.SYS.setuid),
+    @intFromEnum(linux.SYS.setgid),
+    @intFromEnum(linux.SYS.setreuid),
+    @intFromEnum(linux.SYS.setregid),
+    @intFromEnum(linux.SYS.setresuid),
+    @intFromEnum(linux.SYS.setresgid),
+    @intFromEnum(linux.SYS.setgroups),
+    @intFromEnum(linux.SYS.acct),
 
-    // Arch-specific.
-    @intFromEnum(linux.SYS.arch_prctl),
+    // System control - prevents system manipulation
+    @intFromEnum(linux.SYS.reboot),
+    @intFromEnum(linux.SYS.swapon),
+    @intFromEnum(linux.SYS.swapoff),
+
+    // Time/Alarm - can be used for timing attacks
+    @intFromEnum(linux.SYS.setitimer),
+    @intFromEnum(linux.SYS.getitimer),
+    @intFromEnum(linux.SYS.alarm),
+
+    // Debugging - can be used for information leak
+    @intFromEnum(linux.SYS.ptrace),
+    @intFromEnum(linux.SYS.process_vm_readv),
+    @intFromEnum(linux.SYS.process_vm_writev),
+
+    // Others
+    @intFromEnum(linux.SYS.userfaultfd),
+    @intFromEnum(linux.SYS.nfsservctl),
+    @intFromEnum(linux.SYS.get_kernel_syms),
+    @intFromEnum(linux.SYS.query_module),
+    @intFromEnum(linux.SYS.request_key),
+    @intFromEnum(linux.SYS.keyctl),
+    @intFromEnum(linux.SYS.add_key),
 };
 
 /// Build the BPF filter program at comptime. The structure is:
 ///   1. Load arch, reject if not x86_64.
 ///   2. Load syscall nr.
-///   3. For each allowed syscall, jump to ALLOW if equal.
-///   4. Default: KILL_PROCESS.
-///   5. ALLOW label.
+///   3. For each blocked syscall, jump to KILL if equal.
+///   4. Default: ALLOW.
 const filter = build_filter();
 
-fn build_filter() [allowed_syscalls.len + 5]sock_filter {
-    // 3 (load arch + check arch + load nr) + N (jumps) + 1 (kill) + 1 (allow).
-    const n = allowed_syscalls.len;
+fn build_filter() [blocked_syscalls.len + 5]sock_filter {
+    // 3 (load arch + check arch + load nr) + N (jumps) + 1 (allow) + 1 (kill).
+    const n = blocked_syscalls.len;
     var prog: [n + 5]sock_filter = undefined;
 
     // [0] Load architecture.
@@ -167,27 +144,27 @@ fn build_filter() [allowed_syscalls.len + 5]sock_filter {
         BPF_JMP | BPF_JEQ | BPF_K,
         0xC000003E,
         0, // jt: continue to [2]
-        @intCast(n + 1), // jf: jump to kill
+        @intCast(n + 1), // jf: jump to kill (wrong architecture)
     );
     // [2] Load syscall number.
     prog[2] = bpf_stmt(BPF_LD | BPF_W | BPF_ABS, OFFSET_NR);
 
-    // [3..3+n-1] One conditional jump per allowed syscall.
+    // [3..3+n-1] One conditional jump per blocked syscall.
     for (0..n) |i| {
-        // Distance to the ALLOW instruction from this instruction.
-        const dist_to_allow: u8 = @intCast(n - i);
+        // Distance to the KILL instruction from this instruction.
+        const dist_to_kill: u8 = @intCast(n - i);
         prog[3 + i] = bpf_jump(
             BPF_JMP | BPF_JEQ | BPF_K,
-            allowed_syscalls[i],
-            dist_to_allow, // jt: jump to allow
+            blocked_syscalls[i],
+            dist_to_kill, // jt: jump to kill
             0, // jf: continue checking
         );
     }
 
-    // [3+n] Default: kill the process on disallowed syscalls.
-    prog[3 + n] = bpf_stmt(BPF_RET | BPF_K, SECCOMP.RET.KILL_PROCESS);
-    // [3+n+1] Allow.
-    prog[3 + n + 1] = bpf_stmt(BPF_RET | BPF_K, SECCOMP.RET.ALLOW);
+    // [3+n] Default: allow the syscall (if not blocked).
+    prog[3 + n] = bpf_stmt(BPF_RET | BPF_K, SECCOMP.RET.ALLOW);
+    // [3+n+1] Kill (for blocked syscalls or wrong architecture).
+    prog[3 + n + 1] = bpf_stmt(BPF_RET | BPF_K, SECCOMP.RET.KILL_PROCESS);
 
     return prog;
 }
@@ -225,12 +202,12 @@ pub fn install() SeccompError!void {
     ));
     if (rc < 0) return error.SeccompLoadFailed;
 
-    log.info("seccomp filter installed ({d} syscalls allowed)", .{allowed_syscalls.len});
+    log.info("seccomp deny list filter installed ({d} dangerous syscalls blocked)", .{blocked_syscalls.len});
 }
 
 test "filter is built at comptime" {
     // Verify the filter has the expected length.
-    const expected_len = allowed_syscalls.len + 5;
+    const expected_len = blocked_syscalls.len + 5;
     try std.testing.expectEqual(expected_len, filter.len);
 
     // First instruction loads arch.
@@ -240,14 +217,35 @@ test "filter is built at comptime" {
     // Second checks x86_64 (AUDIT_ARCH_X86_64 = 0xC000003E).
     try std.testing.expectEqual(@as(u32, 0xC000003E), filter[1].k);
 
-    // Last instruction is ALLOW.
-    try std.testing.expectEqual(SECCOMP.RET.ALLOW, filter[filter.len - 1].k);
+    // Last instruction is KILL_PROCESS (for blocked syscalls).
+    try std.testing.expectEqual(SECCOMP.RET.KILL_PROCESS, filter[filter.len - 1].k);
 
-    // Second-to-last is KILL_PROCESS.
-    try std.testing.expectEqual(SECCOMP.RET.KILL_PROCESS, filter[filter.len - 2].k);
+    // Second-to-last is ALLOW (default action).
+    try std.testing.expectEqual(SECCOMP.RET.ALLOW, filter[filter.len - 2].k);
 }
 
-test "allowed_syscalls contains essentials" {
+test "blocked_syscalls contains dangerous syscalls" {
+    const dangerous = [_]u32{
+        @intFromEnum(linux.SYS.init_module),
+        @intFromEnum(linux.SYS.kexec_load),
+        @intFromEnum(linux.SYS.socket),
+        @intFromEnum(linux.SYS.ptrace),
+        @intFromEnum(linux.SYS.reboot),
+    };
+    for (dangerous) |nr| {
+        var found = false;
+        for (blocked_syscalls) |b| {
+            if (b == nr) {
+                found = true;
+                break;
+            }
+        }
+        try std.testing.expect(found);
+    }
+}
+
+test "essential syscalls are not blocked" {
+    // These syscalls should NOT be in the blocked list
     const essentials = [_]u32{
         @intFromEnum(linux.SYS.read),
         @intFromEnum(linux.SYS.write),
@@ -257,13 +255,8 @@ test "allowed_syscalls contains essentials" {
         @intFromEnum(linux.SYS.openat),
     };
     for (essentials) |nr| {
-        var found = false;
-        for (allowed_syscalls) |a| {
-            if (a == nr) {
-                found = true;
-                break;
-            }
+        for (blocked_syscalls) |b| {
+            try std.testing.expect(nr != b);
         }
-        try std.testing.expect(found);
     }
 }
