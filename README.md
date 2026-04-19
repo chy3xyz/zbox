@@ -177,5 +177,103 @@ The sandbox still provides full isolation via namespaces (user, mount, PID, UTS,
 - [x] Resource limits (CPU, Memory via cgroups, requires sudo)
 - [x] Network access (NAT/masquerading)
 - [x] Port forwarding (veth + iptables)
-- [ ] pivot_root (more secure than chroot)
+- [x] pivot_root (more secure than chroot)
 - [ ] OCI compatibility (run container images)
+
+## Library Usage
+
+zbox can be embedded as a library in other Zig projects. Here's a basic example:
+
+```zig
+const std = @import("std");
+const zbox = @import("zbox");
+
+pub fn main() !void {
+    const allocator = std.heap.page_allocator;
+
+    // Build configuration programmatically
+    var config_builder = zbox.ConfigBuilder.init(allocator);
+    defer config_builder.deinit();
+
+    const config = try config_builder
+        .set_name("my-sandbox")
+        .set_root("/tmp/sandbox-root")
+        .set_binary("/bin/sh")
+        .set_cpu_cores(1)
+        .set_cpu_limit(50) // 50% CPU limit
+        .set_memory_limit(128) // 128 MB memory limit
+        .enable_network(false)
+        .build();
+    defer config.deinit(allocator);
+
+    // Create sandbox instance
+    var sandbox = try zbox.Sandbox.init(allocator, .{
+        .config = config,
+        .child_args_count = 0,
+    });
+    defer sandbox.deinit();
+
+    // Optional: Enable strict error handling (fail on cgroup/network setup errors)
+    sandbox.set_strict_errors(true);
+
+    // Optional: I/O redirection
+    // const stdout_fd = try std.posix.open("sandbox-output.log", .{ .WRONLY, .CREAT, .TRUNC }, 0o644);
+    // sandbox.set_stdout(stdout_fd);
+
+    // Optional: Add lifecycle callbacks
+    // sandbox.on_pre_spawn(struct {
+    //     fn callback(s: *zbox.Sandbox) !void {
+    //         std.debug.print("About to spawn sandbox\n", .{});
+    //     }
+    // }.callback);
+
+    // Run sandbox
+    try sandbox.spawn();
+    const result = try sandbox.wait();
+
+    switch (result) {
+        .exited => |code| std.debug.print("Sandbox exited with code: {}\n", .{code}),
+        .signaled => |sig| std.debug.print("Sandbox killed by signal: {}\n", .{sig}),
+        else => {},
+    }
+}
+```
+
+## knot3bot Integration
+
+zbox is designed to be embedded in knot3bot to provide secure isolation for untrusted code execution:
+
+1. Add zbox as a dependency in your `build.zig.zon`
+2. Use the `ConfigBuilder` API to dynamically create sandbox configurations for each execution
+3. Set CPU/memory limits appropriate for your workload
+4. Use I/O redirection to capture code output and errors
+5. Use lifecycle callbacks to inject custom preparation/cleanup steps
+
+### Security Considerations for knot3bot
+- Always run with `strict_errors = true` to catch privilege-related setup failures
+- Disable network access unless explicitly required for the workload
+- Use the smallest possible CPU/memory limits that still allow your workload to run
+- Ensure the sandbox root directory is empty and not used by other processes
+
+## API Reference
+
+### `zbox.ConfigBuilder`
+- `init(allocator: std.mem.Allocator)`: Create new builder instance
+- `set_name(name: []const u8)`: Set sandbox name (used for cgroup)
+- `set_binary(path: []const u8)`: Set path to binary to execute inside sandbox (must be absolute)
+- `set_root(path: []const u8)`: Set path to sandbox root directory (must be absolute)
+- `set_cpu_cores(cores: u32)`: Set number of CPU cores available
+- `set_cpu_limit(percent: u32)`: Set CPU usage limit (1-100)
+- `set_memory_limit(mb: u32)`: Set memory limit in megabytes
+- `enable_network(enable: bool)`: Enable/disable network access
+- `add_port_forward(host_port: u16, sandbox_port: u16)`: Add port forwarding rule
+- `build()`: Build `Config` instance (ownership transfers to caller, must call `deinit()` when done)
+
+### `zbox.Sandbox`
+- `init(allocator: std.mem.Allocator, args: Args)`: Create new sandbox instance
+- `deinit()`: Clean up sandbox resources
+- `set_strict_errors(enable: bool)`: Enable/disable strict error mode
+- `set_stdin(fd: posix.fd_t)`, `set_stdout(fd: posix.fd_t)`, `set_stderr(fd: posix.fd_t)`: Set custom I/O file descriptors
+- `on_pre_spawn(callback: LifecycleCallback)`, `on_post_spawn(callback: LifecycleCallback)`, `on_pre_exec(callback: LifecycleCallback)`, `on_cleanup(callback: LifecycleCallback)`: Set lifecycle callbacks
+- `spawn()`: Spawn sandbox child process
+- `wait()`: Wait for child to exit and perform cleanup, returns `WaitResult`

@@ -242,3 +242,169 @@ test "load — rejects zero cpu_limit_percent" {
 
     try std.testing.expectError(error.InvalidConfig, load(allocator, tmp_path));
 }
+
+/// 程序化配置构造器
+/// 用于不用JSON文件，直接用代码构造配置
+pub const Builder = struct {
+    allocator: std.mem.Allocator,
+    name: ?[:0]const u8 = null,
+    binary: ?[:0]const u8 = null,
+    root: ?[:0]const u8 = null,
+    cpu_cores: u32 = 1,
+    cpu_limit_percent: u32 = 100,
+    memory_limit_mb: u32 = 64,
+    port_forwards: std.ArrayList(PortForward),
+    network_access: bool = false,
+
+    pub fn init(allocator: std.mem.Allocator) Builder {
+        return .{
+            .allocator = allocator,
+            .port_forwards = std.ArrayList(PortForward).init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *Builder) void {
+        if (self.name) |n| self.allocator.free(n);
+        if (self.binary) |b| self.allocator.free(b);
+        if (self.root) |r| self.allocator.free(r);
+        self.port_forwards.deinit();
+        self.* = undefined;
+    }
+
+    pub fn set_name(self: *Builder, name: []const u8) !*Builder {
+        self.name = try self.allocator.dupeZ(u8, name);
+        return self;
+    }
+
+    pub fn set_binary(self: *Builder, binary_path: []const u8) !*Builder {
+        if (binary_path.len == 0 or binary_path[0] != '/') {
+            return error.InvalidBinaryPath;
+        }
+        self.binary = try self.allocator.dupeZ(u8, binary_path);
+        return self;
+    }
+
+    pub fn set_root(self: *Builder, root_path: []const u8) !*Builder {
+        if (root_path.len == 0 or root_path[0] != '/') {
+            return error.InvalidRootPath;
+        }
+        self.root = try self.allocator.dupeZ(u8, root_path);
+        return self;
+    }
+
+    pub fn set_cpu_cores(self: *Builder, cores: u32) *Builder {
+        self.cpu_cores = cores;
+        return self;
+    }
+
+    pub fn set_cpu_limit(self: *Builder, percent: u32) !*Builder {
+        if (percent < 1 or percent > 100) {
+            return error.InvalidCpuLimit;
+        }
+        self.cpu_limit_percent = percent;
+        return self;
+    }
+
+    pub fn set_memory_limit(self: *Builder, mb: u32) *Builder {
+        self.memory_limit_mb = mb;
+        return self;
+    }
+
+    pub fn enable_network(self: *Builder, enable: bool) *Builder {
+        self.network_access = enable;
+        return self;
+    }
+
+    pub fn add_port_forward(self: *Builder, host_port: u16, sandbox_port: u16) !*Builder {
+        try self.port_forwards.append(.{
+            .host = host_port,
+            .sandbox = sandbox_port,
+        });
+        return self;
+    }
+
+    /// 构建Config结构体，所有权转移给调用者
+    /// 调用者需要调用Config.deinit()释放内存
+    pub fn build(self: *Builder) !Config {
+        if (self.name == null or self.binary == null or self.root == null) {
+            return error.MissingRequiredField;
+        }
+
+        const port_forwards = try self.port_forwards.toOwnedSlice();
+        errdefer self.allocator.free(port_forwards);
+
+        return Config{
+            .name = self.name.?,
+            .binary = self.binary.?,
+            .root = self.root.?,
+            .cpu_cores = self.cpu_cores,
+            .cpu_limit_percent = self.cpu_limit_percent,
+            .memory_limit_mb = self.memory_limit_mb,
+            .port_forwards = port_forwards,
+            .network_access = self.network_access,
+        };
+    }
+};
+
+
+test "ConfigBuilder - valid configuration" {
+    const allocator = std.testing.allocator;
+
+    var builder = Builder.init(allocator);
+    defer builder.deinit();
+
+    const config = try builder
+        .set_name("test-sandbox")
+        .set_binary("/bin/sh")
+        .set_root("/tmp/test-root")
+        .set_cpu_cores(2)
+        .try set_cpu_limit(75)
+        .set_memory_limit(256)
+        .enable_network(true)
+        .try add_port_forward(8080, 80)
+        .try add_port_forward(2222, 22)
+        .build();
+    defer config.deinit(allocator);
+
+    try std.testing.expectEqualStrings("test-sandbox", config.name);
+    try std.testing.expectEqualStrings("/bin/sh", config.binary);
+    try std.testing.expectEqualStrings("/tmp/test-root", config.root);
+    try std.testing.expectEqual(@as(u32, 2), config.cpu_cores);
+    try std.testing.expectEqual(@as(u32, 75), config.cpu_limit_percent);
+    try std.testing.expectEqual(@as(u32, 256), config.memory_limit_mb);
+    try std.testing.expectEqual(true, config.network_access);
+    try std.testing.expectEqual(@as(usize, 2), config.port_forwards.len);
+    try std.testing.expectEqual(@as(u16, 8080), config.port_forwards[0].host);
+    try std.testing.expectEqual(@as(u16, 80), config.port_forwards[0].sandbox);
+    try std.testing.expectEqual(@as(u16, 2222), config.port_forwards[1].host);
+    try std.testing.expectEqual(@as(u16, 22), config.port_forwards[1].sandbox);
+}
+
+test "ConfigBuilder - validation errors" {
+    const allocator = std.testing.allocator;
+
+    // Test missing required fields
+    var builder1 = Builder.init(allocator);
+    defer builder1.deinit();
+    try std.testing.expectError(error.MissingRequiredField, builder1.build());
+
+    // Test invalid binary path (not absolute)
+    var builder2 = Builder.init(allocator);
+    defer builder2.deinit();
+    try std.testing.expectError(error.InvalidBinaryPath, builder2.set_binary("bin/sh"));
+
+    // Test invalid root path (not absolute)
+    var builder3 = Builder.init(allocator);
+    defer builder3.deinit();
+    try std.testing.expectError(error.InvalidRootPath, builder3.set_root("tmp/root"));
+
+    // Test invalid CPU limit (<1)
+    var builder4 = Builder.init(allocator);
+    defer builder4.deinit();
+    try std.testing.expectError(error.InvalidCpuLimit, builder4.set_cpu_limit(0));
+
+    // Test invalid CPU limit (>100)
+    var builder5 = Builder.init(allocator);
+    defer builder5.deinit();
+    try std.testing.expectError(error.InvalidCpuLimit, builder5.set_cpu_limit(101));
+}

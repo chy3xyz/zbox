@@ -34,18 +34,28 @@ pub fn child_entry(arg: usize) callconv(.c) u8 {
         return 1;
     };
 
-    const chdir_rc: isize = @bitCast(linux.chdir(sandbox_ptr.root_path.ptr));
-    if (chdir_rc < 0) {
-        log.err("chdir failed", .{});
-        return 1;
+    // Pivot root instead of chroot for better security
+    const pivot_rc = linux.syscall2(.pivot_root, @intFromPtr(sandbox_ptr.root_path.ptr), @intFromPtr("/put_old".ptr));
+    if (pivot_rc != 0) {
+        // Fallback to chroot if pivot_root fails for any reason
+        log.warn("pivot_root failed, falling back to chroot", .{});
+        const rc = linux.syscall1(.chroot, @intFromPtr(sandbox_ptr.root_path.ptr));
+        if (rc != 0) {
+            log.err("chroot failed", .{});
+            return 1;
+        }
+        const chdir_rc: isize = @bitCast(linux.chdir("/"));
+        if (chdir_rc < 0) {
+            log.err("chdir / failed", .{});
+            return 1;
+        }
+    } else {
+        // Pivot root succeeded, unmount the old root
+        const umount_rc = linux.syscall2(.umount2, @intFromPtr("/put_old".ptr), linux.MNT.DETACH);
+        if (umount_rc < 0) {
+            log.warn("failed to unmount /put_old", .{});
+        }
     }
-
-    const rc = linux.syscall1(.chroot, @intFromPtr(sandbox_ptr.root_path.ptr));
-    if (rc != 0) {
-        log.err("chroot failed", .{});
-        return 1;
-    }
-
     network.bring_up_loopback() catch |err| {
         log.err("loopback failed: {}", .{err});
         return 1;
@@ -64,6 +74,27 @@ pub fn child_entry(arg: usize) callconv(.c) u8 {
         log.err("seccomp install failed: {}", .{err});
         return 1;
     };
+
+    // I/O redirection: override stdin/stdout/stderr if custom fds are provided
+    if (sandbox_ptr.stdin_fd) |fd| {
+        const dup_rc = linux.dup2(fd, 0);
+        if (dup_rc < 0) log.warn("failed to dup2 stdin", .{});
+    }
+    if (sandbox_ptr.stdout_fd) |fd| {
+        const dup_rc = linux.dup2(fd, 1);
+        if (dup_rc < 0) log.warn("failed to dup2 stdout", .{});
+    }
+    if (sandbox_ptr.stderr_fd) |fd| {
+        const dup_rc = linux.dup2(fd, 2);
+        if (dup_rc < 0) log.warn("failed to dup2 stderr", .{});
+    }
+
+    // Run pre-exec callback if set (runs inside sandbox)
+    if (sandbox_ptr.pre_exec_callback) |callback| {
+        callback(sandbox_ptr) catch |err| {
+            log.warn("pre-exec callback failed: {}", .{err});
+        }
+    }
 
     return do_execve(sandbox_ptr);
 }

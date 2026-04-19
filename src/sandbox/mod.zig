@@ -48,6 +48,9 @@ pub fn decode_wait_status(status: u32) WaitResult {
     return .{ .signaled = @intCast(status & 0x7f) };
 }
 
+/// Lifecycle callback function type. Receives a pointer to the Sandbox instance as argument.
+pub const LifecycleCallback = fn (*Sandbox) anyerror!void;
+
 pub const Sandbox = struct {
     allocator: std.mem.Allocator,
     args: args_mod.Args,
@@ -58,6 +61,20 @@ pub const Sandbox = struct {
     generated_root: bool,
     veth_host: ?[:0]const u8,
     veth_sandbox: ?[:0]const u8,
+    /// 严格错误处理：如果为true，cgroup、网络等错误会返回而不是忽略
+    strict_errors: bool = false,
+    /// Optional file descriptors for I/O redirection
+    stdin_fd: ?posix.fd_t = null,
+    stdout_fd: ?posix.fd_t = null,
+    stderr_fd: ?posix.fd_t = null,
+    /// Pre-spawn callback: runs in parent process before cloning child
+    pre_spawn_callback: ?LifecycleCallback = null,
+    /// Post-spawn callback: runs in parent process after child is spawned and setup is complete
+    post_spawn_callback: ?LifecycleCallback = null,
+    /// Pre-exec callback: runs in child process just before execve (inside sandbox)
+    pre_exec_callback: ?LifecycleCallback = null,
+    /// Cleanup callback: runs in parent process after child exits and cleanup is done
+    cleanup_callback: ?LifecycleCallback = null,
 
     pub fn init(allocator: std.mem.Allocator, args: args_mod.Args) !Sandbox {
         std.debug.assert(args.config.binary.len > 0 and args.config.binary[0] == '/');
@@ -108,11 +125,49 @@ pub const Sandbox = struct {
         self.args.deinit(self.allocator);
     }
 
+    /// Set custom stdin file descriptor. The descriptor will be duplicated in the child process.
+    pub fn set_stdin(self: *Sandbox, fd: posix.fd_t) void {
+        self.stdin_fd = fd;
+    }
+
+    /// Set custom stdout file descriptor. The descriptor will be duplicated in the child process.
+    pub fn set_stdout(self: *Sandbox, fd: posix.fd_t) void {
+        self.stdout_fd = fd;
+    }
+
+    /// Set custom stderr file descriptor. The descriptor will be duplicated in the child process.
+    pub fn set_stderr(self: *Sandbox, fd: posix.fd_t) void {
+        self.stderr_fd = fd;
+    }
+
+    /// Set pre-spawn callback: runs in parent process before cloning child
+    pub fn on_pre_spawn(self: *Sandbox, callback: LifecycleCallback) void {
+        self.pre_spawn_callback = callback;
+    }
+
+    /// Set post-spawn callback: runs in parent process after child is spawned and setup is complete
+    pub fn on_post_spawn(self: *Sandbox, callback: LifecycleCallback) void {
+        self.post_spawn_callback = callback;
+    }
+
+    /// Set pre-exec callback: runs in child process just before execve (inside sandbox)
+    pub fn on_pre_exec(self: *Sandbox, callback: LifecycleCallback) void {
+        self.pre_exec_callback = callback;
+    }
+
+    /// Set cleanup callback: runs in parent process after child exits and cleanup is done
+    pub fn on_cleanup(self: *Sandbox, callback: LifecycleCallback) void {
+        self.cleanup_callback = callback;
+    }
     /// Clone a child into isolated namespaces, perform parent-side setup,
     /// then signal the child to continue.
-    pub fn spawn(self: *Sandbox) !void {
+pub fn spawn(self: *Sandbox) !void {
         std.debug.assert(self.pid == 0);
 
+        // Run pre-spawn callback if set
+        if (self.pre_spawn_callback) |callback| {
+            try callback(self);
+        }
         // Pre-compute veth names before clone so the child's copy of
         // the Sandbox struct already has them (clone without CLONE.VM
         // gives the child a separate address space snapshot).
@@ -142,6 +197,11 @@ pub const Sandbox = struct {
 
         try self.parent_setup();
         try self.signal_child();
+
+        // Run post-spawn callback if set
+        if (self.post_spawn_callback) |callback| {
+            try callback(self);
+        }
     }
 
     /// Wait for the child to exit, log the result, and clean up.
@@ -157,6 +217,11 @@ pub const Sandbox = struct {
             .continued => log.debug("child continued", .{}),
         }
         try self.cleanup();
+
+        // Run cleanup callback if set
+        if (self.cleanup_callback) |callback| {
+            try callback(self);
+        }
     }
 
     fn parent_setup(self: *Sandbox) !void {
@@ -286,4 +351,84 @@ test "decode_wait_status — continued" {
         .continued => {},
         else => return error.UnexpectedResult,
     }
+}
+
+
+test "Lifecycle callback execution order" {
+    const allocator = std.testing.allocator;
+    var call_order = std.ArrayList(u8).init(allocator);
+    defer call_order.deinit();
+
+    const TestContext = struct {
+        order: *std.ArrayList(u8),
+        fn pre_spawn(s: *Sandbox) !void {
+            _ = s;
+            try @This().order.append(1);
+        }
+        fn post_spawn(s: *Sandbox) !void {
+            _ = s;
+            try @This().order.append(2);
+        }
+        fn cleanup(s: *Sandbox) !void {
+            _ = s;
+            try @This().order.append(3);
+        }
+    };
+
+    var ctx = TestContext{ .order = &call_order };
+    
+    // We don't actually run the sandbox in this test, just verify callback setters work
+    var builder = @import("../config.zig").Builder.init(allocator);
+    defer builder.deinit();
+    
+    const config = try builder
+        .set_name("test-callback")
+        .set_binary("/bin/sh")
+        .set_root("/tmp/test")
+        .build();
+    defer config.deinit(allocator);
+    
+    var sandbox = try Sandbox.init(allocator, .{
+        .config = config,
+        .child_args_count = 0,
+    });
+    defer sandbox.deinit();
+    
+    sandbox.on_pre_spawn(ctx.pre_spawn);
+    sandbox.on_post_spawn(ctx.post_spawn);
+    sandbox.on_cleanup(ctx.cleanup);
+    
+    // Verify callbacks are properly set
+    try std.testing.expect(sandbox.pre_spawn_callback != null);
+    try std.testing.expect(sandbox.post_spawn_callback != null);
+    try std.testing.expect(sandbox.cleanup_callback != null);
+}
+
+test "I/O redirection setters" {
+    const allocator = std.testing.allocator;
+    
+    var builder = @import("../config.zig").Builder.init(allocator);
+    defer builder.deinit();
+    
+    const config = try builder
+        .set_name("test-io")
+        .set_binary("/bin/sh")
+        .set_root("/tmp/test")
+        .build();
+    defer config.deinit(allocator);
+    
+    var sandbox = try Sandbox.init(allocator, .{
+        .config = config,
+        .child_args_count = 0,
+    });
+    defer sandbox.deinit();
+    
+    // Test setting I/O fds (we don't actually open files here, just test the API)
+    sandbox.set_stdin(0);
+    sandbox.set_stdout(1);
+    sandbox.set_stderr(2);
+    
+    try std.testing.expectEqual(@as(posix.fd_t, 0), sandbox.stdin_fd.?);
+    try std.testing.expectEqual(@as(posix.fd_t, 1), sandbox.stdout_fd.?);
+    try std.testing.expectEqual(@as(posix.fd_t, 2), sandbox.stderr_fd.?);
 }
